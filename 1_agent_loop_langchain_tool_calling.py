@@ -73,7 +73,7 @@ def run_agent(question: str):
         tool_calls = ai_message.tool_calls # Le modèle demande à python l'exécution de l'outil get_product_price avec le paramètre "laptop" 
 
         # If no tool calls, this is the final answer (Python prend en charge la demande et vérifie si tool_calls est vide)
-        if not tool_calls:
+        if not tool_calls: # Si tool_calls est vide ou None ( ça veut qu'il n'y a plus d'outils, le modèle a terminé son travail)
             print(f"\nFinal Answer: {ai_message.content}")
             return ai_message.content
 
@@ -90,7 +90,8 @@ def run_agent(question: str):
         if tool_to_use is None:
             raise ValueError(f"Tool '{tool_name}' not found in tools_dict.")
 
-        observation = tool_to_use.invoke(tool_args) # La variabele observation contient le résultat de l'exécution de l'outil demandé par le modèle.
+        observation = tool_to_use.invoke(tool_args) # Python exécute l'outil demandé par le modèle et stocke le résultat dans la variable observation.
+        
 
         print(f"[Tool Result] {observation}")
 
