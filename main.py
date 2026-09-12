@@ -1,54 +1,144 @@
-from dotenv import load_dotenv
-from langchain_core.prompts import PromptTemplate
-from  langchain_openai import ChatOpenAI
-from langchain_ollama import ChatOllama
+import os
+from operator import itemgetter
 
+from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_pinecone import PineconeVectorStore
 
 load_dotenv()
 
-def main():
-    print("Hello from langchain-course!")
-    information ="""
-    Elon Reeve Musk (/ˈiːlɒn/ EE-lon; born June 28, 1971) is a businessman and past public official known for his leadership of Tesla and SpaceX. 
-    Musk has been the wealthiest person in the world since 2025; as of May 2026, Forbes estimates his net worth to be US$828 billion.
+print("Initializing components...")
 
-    Born into the wealthy Musk family in Pretoria, South Africa, Musk emigrated in 1989 to Canada; he has Canadian citizenship since his mother was 
-    born there. He received bachelor's degrees in 1997 from the University of Pennsylvania before moving to California to pursue business ventures. 
-    In 1995, Musk co-founded the software company Zip2. Following its sale in 1999, he co-founded X.com, an online payment company that later merged 
-    to form PayPal, which was acquired by eBay in 2002. Musk also became an American citizen in 2002.
+embeddings = OpenAIEmbeddings()
+llm = ChatOpenAI()
 
-    In 2002, Musk founded the space technology company SpaceX, becoming its CEO and chief engineer; the company has since led innovations in reusable 
-    rockets and commercial spaceflight. Musk joined the automaker Tesla as an early investor in 2004 and became its CEO and product architect in 2008; 
-    it has since become a leader in electric vehicles. In 2015, he co-founded OpenAI to advance artificial intelligence (AI) research, but later left; 
-    growing discontent with the organization's direction and leadership in the AI boom in the 2020s led him to establish xAI, which became a subsidiary 
-    of SpaceX in 2026. In 2022, he acquired the social network Twitter, implementing significant changes, and rebranding it as X in 2023. His other 
-    businesses include the neurotechnology company Neuralink, which he co-founded in 2016, and the tunneling company the Boring Company, which he 
-    founded in 2017. In November 2025, Tesla approved a pay package worth $1 trillion for Musk, which he is to receive over 10 years if he meets 
-    specific goals.
+vectorstore = PineconeVectorStore(
+    index_name=os.environ["INDEX_NAME"], embedding=embeddings
+)
 
-    Musk is a supporter of global far-right politics, figures, and political parties. He was the largest donor in the 2024 U.S. presidential election, 
-    where he supported Donald Trump. After Trump was inaugurated as president in January 2025, Musk served as Senior Advisor to the President and as 
-    the de facto head of the Department of Government Efficiency (DOGE). Shortly before a public feud with Trump, Musk left the Trump administration 
-    in May 2025 and returned to managing his companies.
+retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
-    Musk's political activities, statements and views have made him a polarizing figure. He has been criticized for making unscientific and misleading 
-    statements, including spreading COVID-19 misinformation, promoting conspiracy theories, and affirming antisemitic, racist, and transphobic comments.
-    His acquisition of Twitter was controversial due to a subsequent increase in hate speech and the spread of misinformation on the service, following
-   his pledge to decrease censorship. His role in the second Trump administration attracted public backlash, particularly in response to DOGE. 
-   The emails Musk sent to Jeffrey Epstein are included in the Epstein files, which were published in 2025 and 2026 and became a topic of worldwide 
-   debate.
-"""
-    summary_template ="""
-    given the information {information} about a person I want you to create:
-    1. A short summary
-    2. two intersting facts about them
-"""
-    summary_prompt_template = PromptTemplate(input_variables=["information"], template=summary_template)
-    llm = ChatOpenAI(temperature=0, model="gpt-4o-mini")
-   # llm = ChatOllama(temperature=0, model="gemma3:270m")
-    chain = summary_prompt_template | llm
-    response = chain.invoke(input={"information": information})
-    print(response.content)
-# 
+prompt_template = ChatPromptTemplate.from_template(
+    """Answer the question based only on the following context:
+
+{context}
+
+Question: {question}
+
+Provide a detailed answer:"""
+)
+
+
+def format_docs(docs):
+    """Format retrieved documents into a single string."""
+    return "\n\n".join(doc.page_content for doc in docs)
+
+
+# ============================================================================
+# IMPLEMENTATION 1: Without LCEL (Simple Function-Based Approach)
+# ============================================================================
+def retrieval_chain_without_lcel(query: str):
+    """
+    Simple retrieval chain without LCEL.
+    Manually retrieves documents, formats them, and generates a response.
+
+    Limitations:
+    - Manual step-by-step execution
+    - No built-in streaming support
+    - No async support without additional code
+    - Harder to compose with other chains
+    - More verbose and error-prone
+    """
+    # Step 1: Retrieve relevant documents
+    docs = retriever.invoke(query)
+
+    # Step 2: Format documents into context string
+    context = format_docs(docs)
+
+    # Step 3: Format the prompt with context and question
+    messages = prompt_template.format_messages(context=context, question=query)
+
+    # Step 4: Invoke LLM with the formatted messages
+    response = llm.invoke(messages)
+
+    # Step 5: Return the content
+    return response.content
+
+
+# ============================================================================
+# IMPLEMENTATION 2: With LCEL (LangChain Expression Language) - BETTER APPROACH
+# ============================================================================
+def create_retrieval_chain_with_lcel():
+    """
+    Create a retrieval chain using LCEL (LangChain Expression Language).
+    Returns a chain that can be invoked with {"question": "..."}
+
+    Advantages over non-LCEL approach:
+    - Declarative and composable: Easy to chain operations with pipe operator (|)
+    - Built-in streaming: chain.stream() works out of the box
+    - Built-in async: chain.ainvoke() and chain.astream() available
+    - Batch processing: chain.batch() for multiple inputs
+    - Type safety: Better integration with LangChain's type system
+    - Less code: More concise and readable
+    - Reusable: Chain can be saved, shared, and composed with other chains
+    - Better debugging: LangChain provides better observability tools
+    """
+    retrieval_chain = (
+        RunnablePassthrough.assign(
+            context=itemgetter("question") | retriever | format_docs
+        )
+        | prompt_template
+        | llm
+        | StrOutputParser()
+    )
+    return retrieval_chain
+
+
 if __name__ == "__main__":
-    main()
+    print("Retrieving...")
+
+    # Query
+    query = "what is Pinecone in machine learning?"
+
+    # ========================================================================
+    # Option 0: Raw invocation without RAG
+    # ========================================================================
+    print("\n" + "=" * 70)
+    print("IMPLEMENTATION 0: Raw LLM Invocation (No RAG)")
+    print("=" * 70)
+    result_raw = llm.invoke([HumanMessage(content=query)])
+    print("\nAnswer:")
+    print(result_raw.content)
+
+    # ========================================================================
+    # Option 1: Use implementation WITHOUT LCEL
+    # ========================================================================
+    print("\n" + "=" * 70)
+    print("IMPLEMENTATION 1: Without LCEL")
+    print("=" * 70)
+    result_without_lcel = retrieval_chain_without_lcel(query)
+    print("\nAnswer:")
+    print(result_without_lcel)
+
+    # ========================================================================
+    # Option 2: Use implementation WITH LCEL (Better Approach)
+    # ========================================================================
+    print("\n" + "=" * 70)
+    print("IMPLEMENTATION 2: With LCEL - Better Approach")
+    print("=" * 70)
+    print("Why LCEL is better:")
+    print("- More concise and declarative")
+    print("- Built-in streaming: chain.stream()")
+    print("- Built-in async: chain.ainvoke()")
+    print("- Easy to compose with other chains")
+    print("- Better for production use")
+    print("=" * 70)
+
+    chain_with_lcel = create_retrieval_chain_with_lcel()
+    result_with_lcel = chain_with_lcel.invoke({"question": query})
+    print("\nAnswer:")
+    print(result_with_lcel)
